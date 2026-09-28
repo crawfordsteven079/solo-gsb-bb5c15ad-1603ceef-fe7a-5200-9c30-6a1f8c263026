@@ -1141,6 +1141,71 @@ input[type="search"] { min-width: 220px; }
 .ex-create:hover { border-color: var(--ok); color: var(--ok); }
 .ex-revoke:hover { border-color: var(--breaking); color: var(--breaking); }
 
+/* ---------------- 请求样本回放 ---------------- */
+.sample-panel .impact-textarea { min-height: 150px; }
+.sc-table td { vertical-align: top; }
+.sc-sample { display: flex; flex-direction: column; gap: 3px; }
+.sc-meta { color: var(--text-faint); font-size: 11px; }
+.sc-status {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.sc-status.ok { color: var(--ok); }
+.sc-status.bad { color: var(--breaking); }
+.sc-status.warn { color: var(--warn); }
+.sc-status.muted { color: var(--text-faint); }
+.sc-count { font-size: 11px; margin-left: 6px; white-space: nowrap; }
+.sc-count.bad { color: var(--breaking); }
+.sc-count.warn { color: var(--warn); }
+.sc-detail { margin-top: 2px; }
+.sc-detail > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.sc-detail > summary::-webkit-details-marker { display: none; }
+.sc-detail > summary::before {
+  content: "▸";
+  color: var(--text-faint);
+  font-size: 10px;
+  margin-right: 5px;
+  transition: transform .15s;
+}
+.sc-detail[open] > summary::before { transform: rotate(90deg); }
+.sc-detail-body { margin: 6px 0 4px 16px; display: flex; flex-direction: column; gap: 5px; }
+.sc-fail, .sc-unknown {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+}
+.sc-fail { background: rgba(255,93,108,.07); border-left: 2px solid var(--breaking); }
+.sc-unknown { background: rgba(251,191,36,.06); border-left: 2px solid var(--warn); }
+.sc-path {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: #a9c4ff;
+  background: rgba(79,140,255,.1);
+  padding: 0 5px;
+  border-radius: 4px;
+  align-self: flex-start;
+}
+.sc-rule { color: var(--text-dim); font-size: 10.5px; font-weight: 650; }
+.sc-msg { color: var(--text); }
+.sc-verdict { font-size: 12px; font-weight: 650; white-space: nowrap; }
+.sc-verdict.risk { color: var(--breaking); }
+.sc-verdict.ok { color: var(--ok); }
+.sc-verdict.unknown { color: var(--warn); }
+.sc-verdict.muted { color: var(--text-dim); }
+.sc-error { color: var(--breaking); font-size: 12px; }
+tr.sc-row-error td { background: rgba(251,191,36,.05); }
+
 .footer {
   text-align: center;
   color: var(--text-faint);

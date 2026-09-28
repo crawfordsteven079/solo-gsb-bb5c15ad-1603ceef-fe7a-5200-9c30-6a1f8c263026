@@ -1,6 +1,6 @@
 # 🔎 OpenAPI 版本兼容性审查工具
 
-对比新旧两份 **OpenAPI 3.x**（JSON / YAML）文档，递归解析 `$ref`（**支持循环引用**）、合并 `allOf`，按**请求 / 响应两个方向**的语义规则判断每一处变更是否向后兼容，精确定位破坏性变更的 JSON 路径并给出原因；并按 OpenAPI 语义计算每个操作的**有效认证要求**（操作级 `security` 覆盖根级），识别认证收紧（缺少方案 / OAuth scope 变多 / 匿名变需认证）类破坏。支持结果筛选、**根因聚合视图**（有向影响组）、引用展开树浏览、审查报告下载、**单条发现的最小复现包导出**、历史记录与**破坏项对账**（基线审查 vs 当前审查）、**限时豁免**（按 API 标识为破坏项设置带 UTC 到期时间的豁免，"未豁免为零才可放行"）、**组件可达性审计**（从 paths / webhooks 入口沿本地 `$ref` 传递追踪，列出未被入口触达的组件并标出新版独有的未使用组件），以及**调用清单影响定位**（在审查详情导入 `method,path,count` 的 CSV，按旧版 paths 匹配每行调用、按操作汇总调用量并关联破坏性发现；歧义不分配、结果仅本次查看）。
+对比新旧两份 **OpenAPI 3.x**（JSON / YAML）文档，递归解析 `$ref`（**支持循环引用**）、合并 `allOf`，按**请求 / 响应两个方向**的语义规则判断每一处变更是否向后兼容，精确定位破坏性变更的 JSON 路径并给出原因；并按 OpenAPI 语义计算每个操作的**有效认证要求**（操作级 `security` 覆盖根级），识别认证收紧（缺少方案 / OAuth scope 变多 / 匿名变需认证）类破坏。支持结果筛选、**根因聚合视图**（有向影响组）、引用展开树浏览、审查报告下载、**单条发现的最小复现包导出**、历史记录与**破坏项对账**（基线审查 vs 当前审查）、**限时豁免**（按 API 标识为破坏项设置带 UTC 到期时间的豁免，"未豁免为零才可放行"）、**组件可达性审计**（从 paths / webhooks 入口沿本地 `$ref` 传递追踪，列出未被入口触达的组件并标出新版独有的未使用组件）、**调用清单影响定位**（在审查详情导入 `method,path,count` 的 CSV，按旧版 paths 匹配每行调用、按操作汇总调用量并关联破坏性发现；歧义不分配、结果仅本次查看），以及**请求样本回放**（提交多条含旧版操作方法 / 路径模板 / Content-Type / JSON 请求体的样本，逐条返回旧版与新版请求体校验状态、失败字段路径与"旧版接受而新版拒绝"的风险汇总；结果仅本次查看）。
 
 技术栈：**FastAPI + SQLite + 原生 JavaScript**（前端零构建、零框架依赖）。
 
@@ -57,6 +57,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
    - **限时豁免条**：API 标识设置、已豁免 / 未豁免破坏项数量与"未豁免为零才可放行"结论（详见下文「🛡️ 限时豁免」）；
    - **组件可达性审计**：旧版 / 新版两栏列出未被 paths / webhooks 入口触达的组件（类型 / 名称 / 数量），新版独有的未使用组件带徽标，点击条目定位到对应版本的引用树（详见下文「🧭 组件可达性审计」）；
    - **调用清单影响定位**：导入 `method,path,count` 的 CSV，把真实/预期调用量匹配到旧版操作并关联该操作的破坏性发现（详见下文「📊 调用清单影响定位」）；
+   - **请求样本回放**：提交多条请求样本（旧版操作方法 + 路径模板 + Content-Type + JSON 请求体），逐条查看旧版 / 新版请求体校验状态与失败字段路径，汇总"旧版接受而新版拒绝"风险（详见下文「🧪 请求样本回放」）；
    - **逐条发现 / 根因聚合** 视图切换：聚合视图把同根因的发现折叠为有向影响组（详见下文「🧩 根因聚合视图」）；
    - **级别筛选**：🔴 破坏性 / 🟢 兼容 / 🟡 废弃提示 / ⚪ 信息；
    - **方向筛选**（请求 / 响应 / 结构性）、**分类筛选**、关键字搜索（两种视图均生效）；
@@ -260,6 +261,113 @@ GET,/pets/42,250
 
 ---
 
+## 🧪 请求样本回放
+
+审查只能从**契约结构**上推断收紧点，请求样本回放回答更直接的问题：**线上真实的请求体，旧版契约接受的，新版契约会拒绝吗？** 在审查详情页的「🧪 请求样本回放」面板提交多条请求样本，后端用两侧文档对同一份 JSON 请求体分别做 schema 校验，逐条给出旧版 / 新版校验状态与失败字段路径，并汇总「旧版接受而新版拒绝」的风险样本。
+
+### 样本格式
+
+UTF-8 JSON 数组（可上传 `.json` 文件或直接粘贴），每条样本包含：
+
+| 字段 | 说明 |
+| --- | --- |
+| `method` | **旧版**操作的 HTTP 方法，大小写不敏感（如 `post` / `POST`） |
+| `path` | **旧版**操作的路径模板（如 `/pets/{id}`，按模板精确匹配，不是具体路径） |
+| `content_type` | 请求的 Content-Type，如 `application/json`；自动忽略 `; charset=...` 等参数与大小写差异 |
+| `body` | JSON 请求体：可直接写 JSON 值（对象 / 数组 / 标量），也可给 JSON 文本字符串 |
+
+```json
+[
+  {
+    "method": "POST",
+    "path": "/pets",
+    "content_type": "application/json",
+    "body": { "name": "Rex", "kind": "cat", "tags": ["cute"] }
+  },
+  {
+    "method": "POST",
+    "path": "/pets",
+    "content_type": "application/json; charset=utf-8",
+    "body": "{\"name\": \"Kit\", \"kind\": \"dog\"}"
+  }
+]
+```
+
+### 校验与风险规则
+
+（服务端 `app/samplecheck.py`，接口 `POST /api/reviews/{id}/sample-check`；纯函数、无存储）
+
+- **操作定位**：新版按**相同方法与路径模板**查找操作——路径模板精确匹配（不做具体路径→模板匹配）；**新版操作消失（路径或方法不存在）视为新版拒绝**，requestBody 消失或 **Content-Type 对应媒体类型消失（415）同样视为新版拒绝**，失败原因分别标注 `path-removed` / `operation-removed` / `request-body` / `media-type`。
+- **覆盖的校验关键字**：`type`、`required`、`enum`、`properties`、`items`、`allOf` 与**本地 `$ref`**（兼容 OpenAPI 3.0 `nullable: true` 与 3.1 `type: ["…","null"]`；3.1 中 `$ref` 的兄弟字段同样生效）。**循环引用沿引用链安全终止**：重复进入的 `$ref` 分支视为通过，不会无限递归；另有深度 / 步骤预算兜底。
+- **单侧三种状态**：`accepted`（覆盖范围内约束全部满足）/ `rejected`（存在硬违反，带失败字段路径与规则，如 `$.address.zip` 的 `type`、`$.age` 的 `required`、`$.tags[0]` 的 `enum`）/ `undeterminable`。
+- **无法判定（不计风险）**：遇到**无法解析的 `$ref`**，或实例可能被**覆盖范围外的约束**拒绝时（如 `minimum/maximum`、`minLength/maxLength/pattern/format`、`minItems/maxItems/uniqueItems`、`minProperties/maxProperties`、`additionalProperties: false`、`oneOf/anyOf/not`、`if/then/else` 等）——范围外约束**只有在当前实例上实际构成约束或可能被违反时**才标记，避免"假通过"漏报。
+- **风险口径**：仅 **旧版 `accepted` 且新版 `rejected`** 计入风险汇总。**旧版自身拒绝的样本不计风险**（新老都拒绝说明请求本就不合法）；任一侧 `undeterminable` 也不计风险。
+- **逐条报错（不影响其他样本）**：旧版操作不存在、旧版路径模板不存在、方法非法、路径不以 `/` 开头、缺少 Content-Type、请求体为空 / JSON 格式错误、样本不是对象等，逐条在结果中标注错误原因并跳过双侧校验；文件级问题（`samples` 不是数组、为空、超过 200 条）返回 HTTP 400。
+
+### 结果展示
+
+- **汇总卡片**：🔴 风险条数（旧版接受而新版拒绝）、已完成双侧校验数、双侧均接受、无法判定（不计风险）、旧版拒绝（不计风险）、样本错误数；
+- **🔴 风险汇总表**：每条风险的样本序号、旧版操作（方法 + 路径模板）、Content-Type 与新版拒绝原因（含失败字段路径）；
+- **逐条明细**：每行可展开查看旧版 / 新版各自的校验状态徽标、失败字段路径列表（路径 + 规则 + 人类可读原因）与无法判定项；风险行高亮。
+- **只供本次查看**：实时计算、不入库、不出现在 Markdown / JSON 报告中，**不改变原审查结论**；刷新页面或切换审查后需重新提交。
+
+### HTTP API 调用示例
+
+`POST /api/reviews/{id}/sample-check`，请求体为 JSON：
+
+```bash
+curl -X POST http://localhost:8000/api/reviews/1/sample-check \
+  -H "Content-Type: application/json" \
+  -d '{
+    "samples": [
+      {
+        "method": "POST",
+        "path": "/pets",
+        "content_type": "application/json",
+        "body": { "name": "Rex", "kind": "cat" }
+      }
+    ]
+  }'
+```
+
+响应（节选）：
+
+```json
+{
+  "review_id": 1,
+  "summary": {
+    "total": 1, "errors": 0, "evaluated": 1,
+    "risks": 1, "old_rejected": 0, "undeterminable": 0, "both_accepted": 0
+  },
+  "risks": [
+    {
+      "index": 1,
+      "endpoint": "POST /pets",
+      "method": "POST", "path": "/pets",
+      "content_type": "application/json",
+      "new_failures": [
+        { "path": "$.kind", "rule": "enum",
+          "message": "值 \"cat\" 不在枚举允许的取值中。" }
+      ]
+    }
+  ],
+  "samples": [
+    {
+      "index": 1, "endpoint": "POST /pets", "error": null, "risk": true,
+      "old": { "status": "accepted", "failures": [], "unknowns": [] },
+      "new": { "status": "rejected",
+               "failures": [ { "path": "$.kind", "rule": "enum", "message": "…" } ],
+               "unknowns": [] }
+    }
+  ],
+  "note": "校验结果只供本次查看，不改变原审查结论。"
+}
+```
+
+样本级错误出现在对应条目的 `error` 字段（如 `"旧版不存在操作 DELETE /pets。"`、`"JSON 请求体格式错误：…"`），该条不进入双侧校验；文件级错误返回 HTTP 400（如 `samples 为空：至少提交一条请求样本。`）。
+
+---
+
 ## 🛡️ 限时豁免
 
 某些破坏性变更短期内无法修复，但又不能一直阻塞发布——**限时豁免**允许为具体破坏项登记一条带 **UTC 到期时间**的豁免，到期或手动撤销后自动失效，避免"永久豁免"被遗忘。
@@ -338,7 +446,7 @@ GET,/pets/42,250
 ```
 .
 ├── app/
-│   ├── main.py        # FastAPI：审查 / 历史 / 引用树 / 根因聚合 / 破坏项对账 / 组件可达性审计 / 调用清单影响定位 / 限时豁免 / 报告下载 / 健康检查接口
+│   ├── main.py        # FastAPI：审查 / 历史 / 引用树 / 根因聚合 / 破坏项对账 / 组件可达性审计 / 调用清单影响定位 / 请求样本回放 / 限时豁免 / 报告下载 / 健康检查接口
 │   ├── parser.py      # JSON·YAML 载入与 OpenAPI 3.x 校验
 │   ├── refs.py        # JSON Pointer、$ref 解析、循环安全的引用展开树
 │   ├── diff.py        # 语义兼容性规则引擎（请求/响应双方向 + 操作级/根级 security 认证要求）
@@ -346,6 +454,7 @@ GET,/pets/42,250
 │   ├── reconcile.py   # 破坏项对账：稳定身份配对，输出新增 / 延续 / 已消失
 │   ├── reachability.py # 组件可达性审计：paths/webhooks 入口 → 本地 $ref 传递追踪，未触达组件与无效引用
 │   ├── impact.py      # 调用清单影响定位：CSV(method,path,count) → 旧版操作匹配（静态段优先/歧义不分配）+ 破坏关联
+│   ├── samplecheck.py # 请求样本回放：双侧请求体 schema 校验（type/required/enum/properties/items/allOf/本地$ref，循环安全）+ 旧接受/新拒绝风险汇总
 │   ├── exemptions.py  # 限时豁免：API 标识 + 语义指纹匹配，到期 / 撤销判定与放行结论
 │   ├── repro.py       # 最小复现包：文档裁剪、$ref 闭包、复核与 ZIP 打包
 │   ├── reports.py     # Markdown / JSON 报告生成
@@ -353,7 +462,7 @@ GET,/pets/42,250
 ├── static/
 │   ├── index.html     # 单页界面
 │   ├── styles.css
-│   ├── app.js         # 原生 JS：筛选 / 聚合视图 / 展开树 / 历史 / 对账 / 调用清单导入 / 下载
+│   ├── app.js         # 原生 JS：筛选 / 聚合视图 / 展开树 / 历史 / 对账 / 调用清单导入 / 请求样本回放 / 下载
 │   └── samples.js     # 五组内置示例（JSON + YAML，含认证要求收紧）
 ├── Dockerfile
 ├── docker-compose.yml
@@ -375,6 +484,7 @@ GET,/pets/42,250
 | `GET` | `/api/reviews/{id}/reconcile?baseline_id=N` | 破坏项对账：基线 vs 当前审查，输出新增 / 延续 / 已消失三类破坏项及数量（基线不存在 404、与当前相同 400） |
 | `GET` | `/api/reviews/{id}/reachability` | 组件可达性审计：各侧未触达组件（类型/名称/数量）、新版独有标记、无效本地引用明细 |
 | `POST` | `/api/reviews/{id}/impact` | 调用清单影响定位：请求体为 `method,path,count` 的 CSV 文本（`Content-Type: text/csv`），返回按调用量排序的影响表及未匹配 / 歧义 / 非法行（实时计算、不入库、不改变审查结论；缺列 / 无数据行返回 400） |
+| `POST` | `/api/reviews/{id}/sample-check` | 请求样本回放：请求体 `{samples: [{method, path, content_type, body}, ...]}`，逐条返回旧版 / 新版请求体校验状态（accepted/rejected/undeterminable）、失败字段路径与「旧版接受而新版拒绝」风险汇总（实时计算、不入库、不改变审查结论；samples 缺失 / 为空 / 非数组 / 超 200 条返回 400，单条格式错误在条目中逐条报错） |
 | `GET` | `/api/reviews/{id}/pointers` | 引用树根节点分组（paths / components） |
 | `GET` | `/api/reviews/{id}/tree?side=old|new&pointer=/...` | 引用展开树（含循环标记） |
 | `GET` | `/api/reviews/{id}/report?format=markdown|json` | 下载报告（含豁免匹配状态、理由与到期时间） |

@@ -136,6 +136,37 @@
           <div id="impact-body"></div>
         </section>
 
+        <!-- 请求样本回放 -->
+        <section id="sample-panel" class="impact-panel sample-panel hidden">
+          <div class="impact-head">
+            <h3>🧪 请求样本回放（旧版接受 → 新版拒绝？）</h3>
+            <div class="impact-controls">
+              <label class="file-btn">
+                选择 JSON
+                <input type="file" id="sample-file" accept=".json,application/json" hidden />
+              </label>
+              <span id="sample-filename" class="file-name"></span>
+              <button id="sample-run" class="primary-btn">提交并逐条校验</button>
+            </div>
+          </div>
+          <p class="result-meta">
+            提交多条请求样本，每条包含旧版操作的<b>方法</b>与<b>路径模板</b>、<b>Content-Type</b> 和 <b>JSON 请求体</b>；
+            后端按<b>相同方法与路径模板</b>在新版查找操作（操作或媒体类型消失视为新版拒绝），
+            对两侧请求体分别做 schema 校验（覆盖 <code>type</code> / <code>required</code> / <code>enum</code> /
+            <code>properties</code> / <code>items</code> / <code>allOf</code> / 本地 <code>$ref</code>，循环引用安全终止）。
+            <b>无法解析的引用或范围外约束标为无法判定、不计风险；旧版拒绝的样本也不计风险。</b>
+            结果只供本次查看，不改变原审查结论。
+          </p>
+          <details class="impact-paste" open>
+            <summary>样本 JSON（数组；也可直接粘贴后点「提交并逐条校验」）</summary>
+            <textarea id="sample-text" class="impact-textarea" spellcheck="false"
+              placeholder='[&#10;  {&#10;    "method": "POST",&#10;    "path": "/pets",&#10;    "content_type": "application/json",&#10;    "body": { "name": "Rex", "kind": "cat" }&#10;  }&#10;]'></textarea>
+          </details>
+          <div id="sample-banner" class="banner error hidden"></div>
+          <div id="sample-loading" class="loading hidden"><span class="spinner"></span> 正在逐条校验请求样本…</div>
+          <div id="sample-body"></div>
+        </section>
+
         <div class="filters">
           <div class="filter-group" id="severity-filters">
             <button class="chip active" data-severity="all">全部 <span class="count" data-count="all">0</span></button>

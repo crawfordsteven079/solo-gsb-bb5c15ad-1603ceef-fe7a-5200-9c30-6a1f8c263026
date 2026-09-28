@@ -17,6 +17,8 @@
     reconcile: null,       // 最近一次破坏项对账结果
     impact: null,          // 最近一次调用清单影响定位结果（仅本次查看）
     impactRid: null,       // 影响结果所属审查 ID（切换审查即失效）
+    sampleCheck: null,     // 最近一次请求样本回放结果（仅本次查看）
+    sampleRid: null,       // 回放结果所属审查 ID（切换审查即失效）
   };
 
   const SEV_LABEL = {
@@ -179,6 +181,7 @@
     state.groupsMeta = null;
     state.groupsPromise = null;
     resetImpactPanel();
+    resetSamplePanel();
     $$("#view-toggle .toggle-btn").forEach((b) =>
       b.classList.toggle("active", b.dataset.view === "flat"));
     $("#view-meta").textContent = "";
@@ -1427,6 +1430,212 @@
             <td class="imp-reason">${escapeHtml(r.reason || "")}</td>
           </tr>`).join("")}
         </tbody></table></div>`;
+  }
+
+  // ------------------------------------------------------------------ //
+  // 请求样本回放（旧版接受而新版拒绝的请求体风险）
+  // ------------------------------------------------------------------ //
+  const SAMPLE_STATUS = {
+    accepted: { label: "✅ 接受", cls: "ok" },
+    rejected: { label: "❌ 拒绝", cls: "bad" },
+    undeterminable: { label: "❓ 无法判定", cls: "warn" },
+    missing: { label: "— 不存在", cls: "muted" },
+  };
+
+  function resetSamplePanel() {
+    state.sampleCheck = null;
+    state.sampleRid = null;
+    const panel = $("#sample-panel");
+    if (panel) {
+      panel.classList.remove("hidden");
+      $("#sample-body").innerHTML = "";
+      $("#sample-banner").classList.add("hidden");
+      $("#sample-loading").classList.add("hidden");
+    }
+  }
+
+  function showSampleError(msg) {
+    const el = $("#sample-banner");
+    el.textContent = msg;
+    el.classList.remove("hidden");
+  }
+  function hideSampleError() {
+    $("#sample-banner").classList.add("hidden");
+  }
+
+  $("#sample-file").addEventListener("change", () => {
+    const input = $("#sample-file");
+    const file = input.files[0];
+    if (!file) return;
+    $("#sample-filename").textContent = file.name;
+    $("#sample-filename").title = file.name;
+    const reader = new FileReader();
+    reader.onload = () => { $("#sample-text").value = reader.result; };
+    reader.readAsText(file);
+  });
+
+  $("#sample-run").addEventListener("click", runSampleCheck);
+
+  async function runSampleCheck() {
+    if (!state.review || !state.review.id) return;
+    const text = $("#sample-text").value.trim();
+    hideSampleError();
+    if (!text) {
+      showSampleError("请先选择样本 JSON 文件，或在文本框中粘贴样本数组。");
+      return;
+    }
+    let samples;
+    try {
+      samples = JSON.parse(text);
+    } catch (err) {
+      showSampleError(`样本 JSON 解析失败：${err.message}`);
+      return;
+    }
+    if (!Array.isArray(samples)) {
+      showSampleError("样本必须是 JSON 数组，每个元素含 method、path、content_type、body。");
+      return;
+    }
+    if (!samples.length) {
+      showSampleError("样本数组为空：至少提交一条请求样本。");
+      return;
+    }
+    const rid = state.review.id;
+    const btn = $("#sample-run");
+    btn.disabled = true;
+    btn.textContent = "校验中…";
+    $("#sample-loading").classList.remove("hidden");
+    $("#sample-body").innerHTML = "";
+    try {
+      const resp = await fetch(`/api/reviews/${rid}/sample-check`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ samples }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        showSampleError(data.detail || `校验失败（HTTP ${resp.status}）`);
+        return;
+      }
+      state.sampleCheck = data;
+      state.sampleRid = rid;
+      renderSampleCheck(data);
+    } catch (err) {
+      showSampleError(`请求失败：${err.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "提交并逐条校验";
+      $("#sample-loading").classList.add("hidden");
+    }
+  }
+
+  function statusBadge(status) {
+    const s = SAMPLE_STATUS[status];
+    if (!s) return `<span class="sc-status muted">${escapeHtml(status || "—")}</span>`;
+    return `<span class="sc-status ${s.cls}">${s.label}</span>`;
+  }
+
+  function failureList(items, emptyText) {
+    if (!items || !items.length) return `<span class="imp-none">${emptyText}</span>`;
+    return items.map((f) => `
+      <div class="sc-fail">
+        <code class="sc-path">${escapeHtml(f.path || "$")}</code>
+        <span class="sc-rule">${escapeHtml(f.rule || "")}</span>
+        <span class="sc-msg">${escapeHtml(f.message || "")}</span>
+      </div>`).join("");
+  }
+
+  function unknownList(items) {
+    if (!items || !items.length) return "";
+    return items.map((u) => `
+      <div class="sc-unknown">
+        <code class="sc-path">${escapeHtml(u.path || "$")}</code>
+        <span class="sc-rule">${escapeHtml(u.keyword || "")}</span>
+        <span class="sc-msg">${escapeHtml(u.message || "")}</span>
+      </div>`).join("");
+  }
+
+  function renderSampleCheck(data) {
+    const s = data.summary || {};
+    let html = `
+      <div class="impact-summary">
+        <div class="imp-stat ${s.risks ? "bad" : "ok"}"><div class="num">${s.risks ?? 0}</div><div class="label">🔴 风险：旧版接受而新版拒绝</div></div>
+        <div class="imp-stat"><div class="num">${s.evaluated ?? 0}</div><div class="label">已完成双侧校验（${s.total ?? 0} 条提交）</div></div>
+        <div class="imp-stat ok"><div class="num">${s.both_accepted ?? 0}</div><div class="label">双侧均接受</div></div>
+        <div class="imp-stat warn"><div class="num">${s.undeterminable ?? 0}</div><div class="label">无法判定（不计风险）</div></div>
+        <div class="imp-stat warn"><div class="num">${s.old_rejected ?? 0}</div><div class="label">旧版拒绝（不计风险）</div></div>
+        ${s.errors ? `<div class="imp-stat bad"><div class="num">${s.errors}</div><div class="label">样本错误（未校验）</div></div>` : ""}
+      </div>
+      <p class="result-meta">风险仅统计<b>旧版接受、新版拒绝</b>的样本；无法判定（无法解析的引用 / 范围外约束）与旧版拒绝的样本均不计风险。
+      结果只供本次查看，不改变原审查结论。</p>`;
+
+    const risks = data.risks || [];
+    if (risks.length) {
+      html += `<h4 class="impact-sub bad">🔴 风险汇总（${risks.length} 条旧版接受而新版拒绝）</h4>
+        <div class="impact-table-wrap"><table class="impact-table">
+          <thead><tr><th>#</th><th>旧版操作</th><th>Content-Type</th><th>新版拒绝原因（失败字段路径）</th></tr></thead>
+          <tbody>${risks.map((r) => `
+            <tr class="has-breaking">
+              <td class="num-cell">${r.index}</td>
+              <td><span class="finding-endpoint">${escapeHtml(r.endpoint || "")}</span></td>
+              <td><code>${escapeHtml(r.content_type || "")}</code></td>
+              <td>${failureList(r.new_failures, "")}</td>
+            </tr>`).join("")}
+        </tbody></table></div>`;
+    }
+
+    const samples = data.samples || [];
+    html += `<h4 class="impact-sub">逐条明细（${samples.length}）</h4>
+      <div class="impact-table-wrap"><table class="impact-table sc-table">
+        <thead><tr><th>#</th><th>样本</th><th>旧版校验</th><th>新版校验</th><th>结论</th></tr></thead>
+        <tbody>${samples.map((r) => {
+          if (r.error) {
+            return `<tr class="sc-row-error">
+              <td class="num-cell">${r.index}</td>
+              <td><div class="sc-sample">${sampleHead(r)}</div></td>
+              <td colspan="3"><span class="sc-error">⚠️ ${escapeHtml(r.error)}</span></td>
+            </tr>`;
+          }
+          const oldSide = r.old || {};
+          const newSide = r.new || {};
+          const verdict = r.risk
+            ? '<span class="sc-verdict risk">🔴 旧版接受而新版拒绝</span>'
+            : (oldSide.status === "rejected"
+                ? '<span class="sc-verdict muted">旧版拒绝，不计风险</span>'
+                : (oldSide.status === "undeterminable" || newSide.status === "undeterminable"
+                    ? '<span class="sc-verdict unknown">❓ 无法判定，不计风险</span>'
+                    : '<span class="sc-verdict ok">✅ 无风险</span>'));
+          return `<tr class="${r.risk ? "has-breaking" : ""}">
+            <td class="num-cell">${r.index}</td>
+            <td><div class="sc-sample">
+              <span class="finding-endpoint">${escapeHtml(r.endpoint || "")}</span>
+              <div class="sc-meta"><code>${escapeHtml(r.content_type || "")}</code></div>
+            </div></td>
+            <td><details class="sc-detail" ${oldSide.status === "rejected" ? "open" : ""}>
+              <summary>${statusBadge(oldSide.status)}
+                ${oldSide.failures && oldSide.failures.length ? `<span class="sc-count bad">${oldSide.failures.length} 处失败</span>` : ""}
+                ${oldSide.unknowns && oldSide.unknowns.length ? `<span class="sc-count warn">${oldSide.unknowns.length} 处无法判定</span>` : ""}
+              </summary>
+              <div class="sc-detail-body">${failureList(oldSide.failures, "无失败字段")}${unknownList(oldSide.unknowns)}</div>
+            </details></td>
+            <td><details class="sc-detail" ${newSide.status === "rejected" ? "open" : ""}>
+              <summary>${statusBadge(newSide.status)}
+                ${newSide.failures && newSide.failures.length ? `<span class="sc-count bad">${newSide.failures.length} 处失败</span>` : ""}
+                ${newSide.unknowns && newSide.unknowns.length ? `<span class="sc-count warn">${newSide.unknowns.length} 处无法判定</span>` : ""}
+              </summary>
+              <div class="sc-detail-body">${failureList(newSide.failures, "无失败字段")}${unknownList(newSide.unknowns)}</div>
+            </details></td>
+            <td>${verdict}</td>
+          </tr>`;
+        }).join("")}
+        </tbody></table></div>`;
+
+    $("#sample-body").innerHTML = html;
+  }
+
+  function sampleHead(r) {
+    const bits = [r.method, r.path].filter(Boolean).join(" ");
+    return `<span class="finding-endpoint">${escapeHtml(bits || "（不完整样本）")}</span>
+      ${r.content_type ? `<div class="sc-meta"><code>${escapeHtml(r.content_type)}</code></div>` : ""}`;
   }
 
   // ------------------------------------------------------------------ //

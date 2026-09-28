@@ -1,4 +1,4 @@
-"""FastAPI 入口：审查、历史、引用展开树、根因聚合、破坏项对账、组件可达性审计、限时豁免、报告下载、最小复现包导出。"""
+"""FastAPI 入口：审查、历史、引用展开树、根因聚合、破坏项对账、组件可达性审计、调用清单影响定位、请求样本回放、限时豁免、报告下载、最小复现包导出。"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import database, exemptions, groups, impact, reachability, reconcile, reports, repro
+from . import database, exemptions, groups, impact, reachability, reconcile, reports, repro, samplecheck
 from .diff import BREAKING, run_diff, summarize
 from .parser import SpecParseError, load_spec
 from .refs import build_ref_tree, expand_path_to_pointer, list_root_pointers
@@ -62,6 +62,18 @@ class ExemptionCreate(BaseModel):
     finding_id: int = Field(..., description="破坏项发现序号 id")
     reason: str = Field(..., description="豁免理由（必填）")
     expires_at: str = Field(..., description="UTC 到期时间（ISO 8601，须为未来时间）")
+
+
+class SampleCheckRequest(BaseModel):
+    # 元素不约束为 dict：非对象样本由逐条校验给出错误，而不是整请求 422
+    samples: list[Any] = Field(
+        ...,
+        description=(
+            "请求样本数组；每条含 method（旧版操作方法）、path（旧版路径模板）、"
+            "content_type（如 application/json）与 body（JSON 值或 JSON 文本）。"
+            "非对象或字段缺失的元素在结果中逐条报错。"
+        ),
+    )
 
 
 def _version_of(doc: dict[str, Any]) -> str | None:
@@ -321,6 +333,34 @@ async def import_inventory(review_id: int, request: Request) -> dict[str, Any]:
     try:
         result = impact.build_impact(old_doc, review["findings"], csv_text)
     except impact.ImpactCsvError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    result["review_id"] = review_id
+    return result
+
+
+# ---------------------------------------------------------------------- #
+# 请求样本回放（旧版接受而新版拒绝的请求体风险；仅本次查看）
+# ---------------------------------------------------------------------- #
+@app.post("/api/reviews/{review_id}/sample-check")
+def sample_check(review_id: int, req: SampleCheckRequest) -> dict[str, Any]:
+    """逐条回放请求样本，对比旧版 / 新版请求体校验结果。
+
+    每条样本给出旧版与新版的请求体校验状态（接受 / 拒绝 / 无法判定）、
+    失败字段路径，并汇总「旧版接受而新版拒绝」的风险样本。新版按相同
+    方法与路径模板查找操作；操作或媒体类型消失视为新版拒绝。校验覆盖
+    type、required、enum、properties、items、allOf 与本地 $ref（循环
+    引用安全终止）；无法解析的引用或覆盖范围外约束标为无法判定，不计
+    入风险。旧版操作不存在、样本格式错误逐条报错；旧版拒绝的样本不计
+    风险。实时计算、不入库，仅供本次查看，不改变审查结论。
+    """
+    review = database.get_review(review_id, with_specs=True)
+    if review is None:
+        raise HTTPException(status_code=404, detail="审查记录不存在")
+    try:
+        result = samplecheck.build_sample_check(
+            review["old_spec"], review["new_spec"], req.samples
+        )
+    except samplecheck.SampleCheckError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     result["review_id"] = review_id
     return result
