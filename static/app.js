@@ -179,6 +179,7 @@
     state.groupsMeta = null;
     state.groupsPromise = null;
     resetImpactPanel();
+    resetSamplePanel();
     $$("#view-toggle .toggle-btn").forEach((b) =>
       b.classList.toggle("active", b.dataset.view === "flat"));
     $("#view-meta").textContent = "";
@@ -1427,6 +1428,281 @@
             <td class="imp-reason">${escapeHtml(r.reason || "")}</td>
           </tr>`).join("")}
         </tbody></table></div>`;
+  }
+
+  // ------------------------------------------------------------------ //
+  // 请求样本回放校验（旧/新请求体 schema 逐条校验 + 风险汇总；仅本次查看）
+  // ------------------------------------------------------------------ //
+  const SAMPLE_METHODS = ["POST", "PUT", "PATCH", "DELETE", "GET", "HEAD", "OPTIONS", "TRACE"];
+  const SAMPLE_STATUS = {
+    accepted: { icon: "✅", label: "接受", cls: "ok" },
+    rejected: { icon: "❌", label: "拒绝", cls: "bad" },
+    undetermined: { icon: "❓", label: "无法判定", cls: "warn" },
+  };
+
+  function resetSamplePanel() {
+    const panel = $("#sample-panel");
+    if (!panel) return;
+    panel.classList.remove("hidden");
+    $("#sample-result").innerHTML = "";
+    $("#sample-banner").classList.add("hidden");
+    $("#sample-loading").classList.add("hidden");
+    if (!$("#sample-editor").children.length) addSampleRow();
+  }
+
+  function addSampleRow(prefill) {
+    const box = $("#sample-editor");
+    const row = document.createElement("div");
+    row.className = "sample-row";
+    const methods = SAMPLE_METHODS.map((m) =>
+      `<option value="${m}"${prefill && prefill.method === m ? " selected" : ""}>${m}</option>`).join("");
+    row.innerHTML = `
+      <div class="sample-row-head">
+        <span class="sample-row-title">样本</span>
+        <select class="s-method" aria-label="HTTP 方法">${methods}</select>
+        <input class="s-path" type="text" placeholder="旧版路径模板，如 /pets/{id}"
+          value="${escapeAttr((prefill && prefill.path) || "")}" aria-label="路径模板" />
+        <input class="s-ct" type="text" placeholder="Content-Type"
+          value="${escapeAttr((prefill && prefill.content_type) || "application/json")}" aria-label="Content-Type" />
+        <button type="button" class="mini-link s-del" title="删除该样本">✕ 删除</button>
+      </div>
+      <textarea class="s-body" spellcheck="false"
+        placeholder='JSON 请求体，如：&#10;{&#10;  "name": "Rex",&#10;  "status": "sold"&#10;}'>${escapeHtml((prefill && prefill.body) || "")}</textarea>`;
+    box.appendChild(row);
+    row.querySelector(".s-del").addEventListener("click", () => {
+      row.remove();
+      if (!box.children.length) addSampleRow();
+    });
+  }
+
+  // 根据旧版文档第一个带 JSON 请求体的操作生成占位样本（仅支持 JSON 文本）
+  $("#sample-example").addEventListener("click", () => {
+    const raw = $("#old-spec").value.trim();
+    if (!raw) {
+      showSampleError("当前旧版文档来自历史记录（页面上没有旧版文本），无法自动生成示例；请手动填写方法、路径模板与 JSON 请求体。");
+      return;
+    }
+    let spec;
+    try {
+      spec = JSON.parse(raw);
+    } catch (_) {
+      showSampleError("自动生成示例仅支持 JSON 格式的旧版文档（YAML 请手动填写样本）。");
+      return;
+    }
+    const found = findOldJsonOperation(spec);
+    if (!found) {
+      showSampleError("旧版文档中未找到带 application/json 请求体的操作，请手动填写样本。");
+      return;
+    }
+    const body = sampleBodyFromSchema(spec, found.schema, new Set(), 0);
+    addSampleRow({
+      method: found.method,
+      path: found.path,
+      content_type: "application/json",
+      body: JSON.stringify(body, null, 2),
+    });
+    hideSampleError();
+  });
+
+  function findOldJsonOperation(spec) {
+    const paths = spec.paths || {};
+    for (const [path, rawItem] of Object.entries(paths)) {
+      const item = (rawItem && rawItem.$ref) ? resolveLocalPointer(spec, rawItem.$ref) : rawItem;
+      if (!item || typeof item !== "object") continue;
+      for (const m of ["post", "put", "patch", "delete"]) {
+        const op = item[m];
+        const content = op && op.requestBody && op.requestBody.content;
+        if (content && (content["application/json"] || content["*/*"])) {
+          const media = content["application/json"] || content["*/*"];
+          if (media && media.schema) {
+            return { method: m.toUpperCase(), path, schema: media.schema };
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  function resolveLocalPointer(doc, ref) {
+    if (typeof ref !== "string" || !ref.includes("#")) return undefined;
+    const frag = ref.split("#")[1];
+    if (!frag || frag === "/") return doc;
+    let cur = doc;
+    for (const tok of frag.replace(/^\//, "").split("/")) {
+      const key = tok.replace("~1", "/").replace("~0", "~");
+      if (cur == null || !(key in cur)) return undefined;
+      cur = cur[key];
+    }
+    return cur;
+  }
+
+  function sampleBodyFromSchema(doc, schema, seen, depth) {
+    if (!schema || typeof schema !== "object" || depth > 4) return {};
+    if (schema.$ref) {
+      if (seen.has(schema.$ref)) return {};
+      const target = resolveLocalPointer(doc, schema.$ref);
+      if (!target) return {};
+      return sampleBodyFromSchema(doc, target, new Set(seen).add(schema.$ref), depth);
+    }
+    const out = {};
+    const props = schema.properties || {};
+    for (const name of schema.required || []) {
+      out[name] = placeholderValue(doc, props[name], seen, depth);
+    }
+    for (const sub of schema.allOf || []) {
+      Object.assign(out, sampleBodyFromSchema(doc, sub, seen, depth + 1));
+    }
+    return out;
+  }
+
+  function placeholderValue(doc, schema, seen, depth) {
+    if (!schema || typeof schema !== "object") return null;
+    if (schema.$ref) return sampleBodyFromSchema(doc, schema, seen, depth);
+    if (Array.isArray(schema.enum) && schema.enum.length) return schema.enum[0];
+    const t = Array.isArray(schema.type) ? schema.type[0] : schema.type;
+    if (t === "string") return "string";
+    if (t === "integer") return 0;
+    if (t === "number") return 0;
+    if (t === "boolean") return true;
+    if (t === "array") return schema.items ? [placeholderValue(doc, schema.items, seen, depth + 1)] : [];
+    if (t === "object") return sampleBodyFromSchema(doc, schema, seen, depth + 1);
+    return null;
+  }
+
+  function showSampleError(msg) {
+    const el = $("#sample-banner");
+    el.textContent = msg;
+    el.classList.remove("hidden");
+  }
+  function hideSampleError() {
+    $("#sample-banner").classList.add("hidden");
+  }
+
+  $("#sample-add").addEventListener("click", () => addSampleRow());
+  $("#sample-run").addEventListener("click", runSampleValidation);
+
+  function collectSamples() {
+    return $$("#sample-editor .sample-row").map((row, i) => ({
+      index: i + 1,
+      method: row.querySelector(".s-method").value,
+      path: row.querySelector(".s-path").value.trim(),
+      content_type: row.querySelector(".s-ct").value.trim(),
+      body: row.querySelector(".s-body").value,
+    }));
+  }
+
+  async function runSampleValidation() {
+    if (!state.review || !state.review.id) return;
+    hideSampleError();
+    const samples = collectSamples();
+    if (!samples.length) {
+      showSampleError("请先添加至少一条请求样本。");
+      return;
+    }
+    const rid = state.review.id;
+    const btn = $("#sample-run");
+    btn.disabled = true;
+    btn.textContent = "校验中…";
+    $("#sample-loading").classList.remove("hidden");
+    $("#sample-result").innerHTML = "";
+    try {
+      const resp = await fetch(`/api/reviews/${rid}/sample-validation`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ samples }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        showSampleError(data.detail || `校验失败（HTTP ${resp.status}）`);
+        return;
+      }
+      renderSampleResult(data);
+    } catch (err) {
+      showSampleError(`请求失败：${err.message}`);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "提交校验";
+      $("#sample-loading").classList.add("hidden");
+    }
+  }
+
+  function statusBadge(status) {
+    const meta = SAMPLE_STATUS[status];
+    return meta
+      ? `<span class="sample-status ${meta.cls}">${meta.icon} ${meta.label}</span>`
+      : `<span class="sample-status">${escapeHtml(status || "—")}</span>`;
+  }
+
+  function failureListHtml(failures) {
+    if (!failures || !failures.length) return '<div class="sample-ok">无失败字段</div>';
+    return `<table class="sample-fails"><thead><tr><th>失败字段路径</th><th>规则</th><th>原因</th></tr></thead><tbody>` +
+      failures.map((f) => `<tr>
+        <td><code>${escapeHtml(f.path || "（请求体根）")}</code></td>
+        <td><span class="sample-rule">${escapeHtml(f.rule)}</span></td>
+        <td>${escapeHtml(f.message)}</td>
+      </tr>`).join("") + "</tbody></table>";
+  }
+
+  function notesListHtml(notes) {
+    if (!notes || !notes.length) return "";
+    return `<details class="sample-notes"><summary>❓ 无法判定项（${notes.length}，不计入风险）</summary>` +
+      notes.map((n) => `<div class="sample-note">
+        <code>${escapeHtml(n.path || "（请求体根）")}</code>
+        <span class="sample-rule">${escapeHtml(n.rule)}</span>
+        ${escapeHtml(n.message)}</div>`).join("") + "</details>";
+  }
+
+  function sideHtml(sideLabel, side) {
+    if (!side) return `<div class="sample-side"><div class="sample-side-head">${sideLabel}</div>—</div>`;
+    return `<div class="sample-side st-${side.status}">
+      <div class="sample-side-head"><b>${sideLabel}</b>
+        ${statusBadge(side.status)}
+        ${side.media_type ? `<code class="sample-mt">${escapeHtml(side.media_type)}</code>` : ""}
+      </div>
+      ${failureListHtml(side.failures)}
+      ${notesListHtml(side.undetermined)}
+    </div>`;
+  }
+
+  function renderSampleResult(data) {
+    const s = data.summary || {};
+    let html = `<div class="impact-summary">
+      <div class="imp-stat ${s.risks ? "bad" : "ok"}"><div class="num">${s.risks ?? 0}</div><div class="label">🔴 旧版接受而新版拒绝（风险）</div></div>
+      <div class="imp-stat"><div class="num">${s.total ?? 0}</div><div class="label">样本总数（${s.errors ?? 0} 条错误）</div></div>
+      <div class="imp-stat"><div class="num">${s.old_accepted ?? 0} / ${s.old_rejected ?? 0} / ${s.old_undetermined ?? 0}</div><div class="label">旧版 接受 / 拒绝 / 无法判定</div></div>
+      <div class="imp-stat"><div class="num">${s.new_accepted ?? 0} / ${s.new_rejected ?? 0} / ${s.new_undetermined ?? 0}</div><div class="label">新版 接受 / 拒绝 / 无法判定</div></div>
+      <div class="imp-stat warn"><div class="num">${s.excluded ?? 0}</div><div class="label">未计风险（旧版拒绝/无法判定）</div></div>
+    </div>
+    <p class="result-meta">仅<b>旧版接受而新版拒绝</b>计为风险；旧版拒绝的样本本身不合法、无法判定的样本均不计风险。结果只供本次查看，不改变审查结论。</p>`;
+
+    html += (data.items || []).map((it) => {
+      if (it.error) {
+        return `<div class="sample-item sample-error">
+          <div class="sample-item-head">
+            <span class="sample-idx">#${it.index ?? "?"}</span>
+            ${it.method ? `<span class="finding-endpoint">${escapeHtml(it.method)} ${escapeHtml(it.path || "")}</span>` : ""}
+            <span class="sample-status bad">⚠️ 样本错误</span>
+          </div>
+          <div class="sample-error-msg">${escapeHtml(it.error)}</div>
+        </div>`;
+      }
+      const risk = it.risk === true;
+      return `<div class="sample-item${risk ? " is-risk" : ""}">
+        <div class="sample-item-head">
+          <span class="sample-idx">#${it.index}</span>
+          <span class="finding-endpoint">${escapeHtml(it.method || "")} ${escapeHtml(it.path || "")}</span>
+          <code class="sample-ct">${escapeHtml(it.content_type || "")}</code>
+          ${risk
+            ? '<span class="sample-status bad" title="旧版接受而新版拒绝">🔴 旧版接受而新版拒绝</span>'
+            : it.risk === false
+              ? '<span class="sample-status ok">无风险（新版同样接受）</span>'
+              : '<span class="sample-status warn">不计风险</span>'}
+        </div>
+        <div class="sample-sides">${sideHtml("旧版", it.old)}${sideHtml("新版", it.new)}</div>
+      </div>`;
+    }).join("");
+
+    $("#sample-result").innerHTML = html;
   }
 
   // ------------------------------------------------------------------ //

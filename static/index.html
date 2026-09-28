@@ -136,6 +136,31 @@
           <div id="impact-body"></div>
         </section>
 
+        <!-- 请求样本回放校验 -->
+        <section id="sample-panel" class="impact-panel sample-panel hidden">
+          <div class="impact-head">
+            <h3>🧪 请求样本回放校验</h3>
+            <div class="impact-controls">
+              <button id="sample-add" class="ghost-btn" type="button">＋ 添加一条样本</button>
+              <button id="sample-example" class="ghost-btn" type="button"
+                title="按当前旧版文档的第一个带 application/json 请求体的操作填入一条示例">填入旧版示例</button>
+              <button id="sample-run" class="primary-btn" type="button">提交校验</button>
+            </div>
+          </div>
+          <p class="result-meta">
+            每条样本填写<b>旧版操作</b>的方法与路径模板（如 <code>POST</code> / <code>/pets/{id}</code>）、
+            <b>Content-Type</b> 与 <b>JSON 请求体</b>；新版按<b>相同方法和路径模板</b>查找操作，
+            <b>操作或媒体类型消失视为新版拒绝</b>。校验覆盖 <code>type / required / enum / properties / items / allOf</code>
+            与本地 <code>$ref</code>（循环引用安全终止）；无法解析的引用或范围外约束（<code>format/pattern/oneOf/…</code>）
+            标为<b>无法判定</b>、不计风险。<b>旧版操作不存在 / JSON 格式错误逐条报错；旧版拒绝的样本不计风险。</b>
+            结果只供本次查看，不改变审查结论。
+          </p>
+          <div id="sample-banner" class="banner error hidden"></div>
+          <div id="sample-loading" class="loading hidden"><span class="spinner"></span> 正在逐条校验请求样本…</div>
+          <div id="sample-result"></div>
+          <div id="sample-editor" class="sample-editor"></div>
+        </section>
+
         <div class="filters">
           <div class="filter-group" id="severity-filters">
             <button class="chip active" data-severity="all">全部 <span class="count" data-count="all">0</span></button>

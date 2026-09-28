@@ -1,6 +1,6 @@
 # 🔎 OpenAPI 版本兼容性审查工具
 
-对比新旧两份 **OpenAPI 3.x**（JSON / YAML）文档，递归解析 `$ref`（**支持循环引用**）、合并 `allOf`，按**请求 / 响应两个方向**的语义规则判断每一处变更是否向后兼容，精确定位破坏性变更的 JSON 路径并给出原因；并按 OpenAPI 语义计算每个操作的**有效认证要求**（操作级 `security` 覆盖根级），识别认证收紧（缺少方案 / OAuth scope 变多 / 匿名变需认证）类破坏。支持结果筛选、**根因聚合视图**（有向影响组）、引用展开树浏览、审查报告下载、**单条发现的最小复现包导出**、历史记录与**破坏项对账**（基线审查 vs 当前审查）、**限时豁免**（按 API 标识为破坏项设置带 UTC 到期时间的豁免，"未豁免为零才可放行"）、**组件可达性审计**（从 paths / webhooks 入口沿本地 `$ref` 传递追踪，列出未被入口触达的组件并标出新版独有的未使用组件），以及**调用清单影响定位**（在审查详情导入 `method,path,count` 的 CSV，按旧版 paths 匹配每行调用、按操作汇总调用量并关联破坏性发现；歧义不分配、结果仅本次查看）。
+对比新旧两份 **OpenAPI 3.x**（JSON / YAML）文档，递归解析 `$ref`（**支持循环引用**）、合并 `allOf`，按**请求 / 响应两个方向**的语义规则判断每一处变更是否向后兼容，精确定位破坏性变更的 JSON 路径并给出原因；并按 OpenAPI 语义计算每个操作的**有效认证要求**（操作级 `security` 覆盖根级），识别认证收紧（缺少方案 / OAuth scope 变多 / 匿名变需认证）类破坏。支持结果筛选、**根因聚合视图**（有向影响组）、引用展开树浏览、审查报告下载、**单条发现的最小复现包导出**、历史记录与**破坏项对账**（基线审查 vs 当前审查）、**限时豁免**（按 API 标识为破坏项设置带 UTC 到期时间的豁免，"未豁免为零才可放行"）、**组件可达性审计**（从 paths / webhooks 入口沿本地 `$ref` 传递追踪，列出未被入口触达的组件并标出新版独有的未使用组件），以及**调用清单影响定位**（在审查详情导入 `method,path,count` 的 CSV，按旧版 paths 匹配每行调用、按操作汇总调用量并关联破坏性发现；歧义不分配、结果仅本次查看），以及**请求样本回放校验**（在审查详情提交多条 `method,path,content_type,body` 请求样本，逐条回放旧版/新版请求体 schema：type/required/enum/properties/items/allOf/本地 $ref（循环安全），返回两侧校验状态、失败字段路径与"旧版接受而新版拒绝"风险汇总；范围外约束与无法解析的引用标无法判定、不计风险；结果仅本次查看）。
 
 技术栈：**FastAPI + SQLite + 原生 JavaScript**（前端零构建、零框架依赖）。
 
@@ -260,6 +260,106 @@ GET,/pets/42,250
 
 ---
 
+## 🧪 请求样本回放校验
+
+审查回答"契约上有哪些破坏"，但有时候你手里已经有一批**真实的 / 计划发送的请求样本**，想直接知道：**这些请求体在旧版、新版契约下分别能不能通过校验，哪些是"旧版接受而新版拒绝"的实锤风险**。审查详情页的「**请求样本回放校验**」面板支持一次提交多条样本，逐条回放两侧请求体 schema 并给出风险汇总。
+
+### 样本格式（页面逐条填写，或直接调 API）
+
+每条样本包含 4 个字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `method` | **旧版操作**的 HTTP 方法，大小写不敏感（`post` 与 `POST` 等价） |
+| `path` | **旧版路径模板**，须以 `/` 开头，如 `/pets/{id}`（不是具体路径） |
+| `content_type` | 请求 Content-Type，如 `application/json`；允许带参数（`application/json; charset=utf-8`，也兼容 `application/vnd.x+json` 与 `*/*` 通配） |
+| `body` | **JSON 请求体**：JSON 文本字符串，或直接的 JSON 值（对象 / 数组 / 标量 / `null`） |
+
+### 使用方式
+
+1. 执行审查（或在「历史记录」中打开一条已保存审查）；
+2. 在结果区「🧪 请求样本回放校验」面板点「**＋ 添加一条样本**」逐行填写（点「**填入旧版示例**」可从当前旧版文档第一个带 JSON 请求体的操作生成占位样本）；
+3. 点击「**提交校验**」，页面展示：
+   - **汇总卡片**：🔴 风险条数（旧版接受而新版拒绝）、样本总数与逐条错误数、旧版 / 新版各自「接受 / 拒绝 / 无法判定」计数、未计风险条数；
+   - **逐条明细**：方法 + 路径模板 + Content-Type、旧版与新版各自的校验状态与实际命中的媒体类型；
+   - 拒绝时列出**失败字段路径**（如 `address.zip`、`tags[0]`、请求体根）、**规则**（`type` / `required` / `enum` / `items` / `additional-properties` / `operation-removed` / `media-type-removed` 等）与人类可读原因；
+   - 无法判定的部分可展开查看（字段路径 + 原因）；样本级错误（旧版操作不存在、媒体类型不被旧版接受、JSON 格式错误、字段缺失等）逐行给出原因。
+4. **回放结果只供本次查看**：实时计算、不入库、不出现在报告中，**不改变审查结论**；刷新页面或切换审查后需重新提交。
+
+### 校验原理
+
+（服务端 `app/sample_validate.py`，接口 `POST /api/reviews/{id}/sample-validation`；纯函数、无存储）
+
+- **操作定位**：以样本的 `method + path`（路径模板原样匹配）在**旧版** `paths` 中查找操作——**旧版操作不存在，该条直接报错**（旧版都没有的契约无法回放）；新版按**相同方法和路径模板**查找：**操作消失 = 新版拒绝**（失败规则 `operation-removed`，对应 404/405）；操作还在但 `requestBody.content` 不再包含该 Content-Type，**媒体类型消失 = 新版拒绝**（`media-type-removed`，对应 415）。
+- **Schema 校验**覆盖：`type`（含 OpenAPI 3.0 `nullable: true` 与 3.1 `type: ["string","null"]` 两种可空写法，且严格区分 `true` 与整数）、`required`、`enum`、`properties`（逐字段递归）、`items`（数组逐元素递归，失败路径形如 `tags[0]`）、`allOf`（合取：required 取并集、同名字段约束合取、enum 取交集）与**本地 `$ref`**。
+- **循环引用安全终止**：合取成员以"已展开引用指针栈"做 DFS 去重，`A → B → A` 的自引用 / 互相引用只展开一次；样本数据递归设了深度上限，恶意深嵌套不会耗尽资源。
+- **无法判定（undetermined）**：遇到**无法解析的引用**（断裂 / 外部 `$ref`）或**范围外约束**——`anyOf / oneOf / not`（本功能只实现 `allOf` 合取）、`format / pattern / minimum / maximum / minLength / maxLength / minItems / maxItems / uniqueItems / minProperties / maxProperties / additionalProperties 的 patternProperties 等`——该侧只要**没有确定的失败字段**就标为**无法判定**（同时列出触发原因与位置），**不冒充接受也不计入风险**。
+- **风险口径**：只有 **旧版 accepted 且新版 rejected** 才计 1 条风险；**旧版拒绝的样本本身不合法、不计风险**（新版仍会照常回放供参考）；任一侧无法判定也不计风险（汇总中计入"未计风险"）。
+
+### HTTP API 调用示例
+
+```bash
+curl -X POST "http://localhost:8000/api/reviews/7/sample-validation" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "samples": [
+      {
+        "method": "POST",
+        "path": "/pets",
+        "content_type": "application/json",
+        "body": "{\"name\":\"Rex\",\"status\":\"sold\"}"
+      },
+      {
+        "method": "POST",
+        "path": "/pets",
+        "content_type": "application/json",
+        "body": { "name": "Kit", "status": "available", "tags": ["cat"] }
+      }
+    ]
+  }'
+```
+
+`body` 既可传 JSON 文本字符串，也可直接传 JSON 值（如上例第二条）。响应：
+
+```json
+{
+  "review_id": 7,
+  "summary": {
+    "total": 2, "errors": 0,
+    "old_accepted": 2, "old_rejected": 0, "old_undetermined": 0,
+    "new_accepted": 1, "new_rejected": 1, "new_undetermined": 0,
+    "risks": 1, "not_risk": 1, "excluded": 0
+  },
+  "risks": [
+    {
+      "index": 1, "method": "POST", "path": "/pets",
+      "content_type": "application/json",
+      "new_failures": [
+        { "path": "status", "rule": "enum",
+          "message": "值 \"sold\" 不在枚举允许值 [\"available\", \"pending\"] 中。" }
+      ]
+    }
+  ],
+  "items": [
+    {
+      "index": 1, "method": "POST", "path": "/pets", "content_type": "application/json",
+      "error": null, "risk": true,
+      "old": { "status": "accepted", "media_type": "application/json",
+               "failures": [], "undetermined": [] },
+      "new": { "status": "rejected", "media_type": "application/json",
+               "failures": [ { "path": "status", "rule": "enum", "message": "…" } ],
+               "undetermined": [] }
+    }
+  ],
+  "note": "回放结果只供本次查看，实时计算、不入库，不改变审查结论。"
+}
+```
+
+- 每条样本的旧/新侧状态为 `accepted` / `rejected` / `undetermined`；样本本身有问题（旧版操作不存在、JSON 解析失败、字段缺失等）时该条返回 `error` 且不带两侧结果；
+- `samples` 缺失 / 不是数组 / 为空 / 超过 200 条返回 HTTP 400；审查不存在返回 404。单条样本的任何问题都不会中断其它样本，逐条给出结果。
+
+---
+
 ## 🛡️ 限时豁免
 
 某些破坏性变更短期内无法修复，但又不能一直阻塞发布——**限时豁免**允许为具体破坏项登记一条带 **UTC 到期时间**的豁免，到期或手动撤销后自动失效，避免"永久豁免"被遗忘。
@@ -346,6 +446,7 @@ GET,/pets/42,250
 │   ├── reconcile.py   # 破坏项对账：稳定身份配对，输出新增 / 延续 / 已消失
 │   ├── reachability.py # 组件可达性审计：paths/webhooks 入口 → 本地 $ref 传递追踪，未触达组件与无效引用
 │   ├── impact.py      # 调用清单影响定位：CSV(method,path,count) → 旧版操作匹配（静态段优先/歧义不分配）+ 破坏关联
+│   ├── sample_validate.py # 请求样本回放校验：真实 JSON 请求体 × 旧/新请求体 schema（type/required/enum/properties/items/allOf/本地 $ref，循环安全），风险汇总
 │   ├── exemptions.py  # 限时豁免：API 标识 + 语义指纹匹配，到期 / 撤销判定与放行结论
 │   ├── repro.py       # 最小复现包：文档裁剪、$ref 闭包、复核与 ZIP 打包
 │   ├── reports.py     # Markdown / JSON 报告生成
@@ -375,6 +476,7 @@ GET,/pets/42,250
 | `GET` | `/api/reviews/{id}/reconcile?baseline_id=N` | 破坏项对账：基线 vs 当前审查，输出新增 / 延续 / 已消失三类破坏项及数量（基线不存在 404、与当前相同 400） |
 | `GET` | `/api/reviews/{id}/reachability` | 组件可达性审计：各侧未触达组件（类型/名称/数量）、新版独有标记、无效本地引用明细 |
 | `POST` | `/api/reviews/{id}/impact` | 调用清单影响定位：请求体为 `method,path,count` 的 CSV 文本（`Content-Type: text/csv`），返回按调用量排序的影响表及未匹配 / 歧义 / 非法行（实时计算、不入库、不改变审查结论；缺列 / 无数据行返回 400） |
+| `POST` | `/api/reviews/{id}/sample-validation` | 请求样本回放校验：多条 `{method, path, content_type, body}` 样本逐条返回旧版/新版请求体校验状态、失败字段路径与"旧版接受而新版拒绝"风险汇总（覆盖 type/required/enum/properties/items/allOf/本地 $ref；范围外约束与无法解析的引用标无法判定；实时计算、不入库、不改变审查结论） |
 | `GET` | `/api/reviews/{id}/pointers` | 引用树根节点分组（paths / components） |
 | `GET` | `/api/reviews/{id}/tree?side=old|new&pointer=/...` | 引用展开树（含循环标记） |
 | `GET` | `/api/reviews/{id}/report?format=markdown|json` | 下载报告（含豁免匹配状态、理由与到期时间） |

@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import database, exemptions, groups, impact, reachability, reconcile, reports, repro
+from . import database, exemptions, groups, impact, reachability, reconcile, reports, repro, sample_validate
 from .diff import BREAKING, run_diff, summarize
 from .parser import SpecParseError, load_spec
 from .refs import build_ref_tree, expand_path_to_pointer, list_root_pointers
@@ -62,6 +62,19 @@ class ExemptionCreate(BaseModel):
     finding_id: int = Field(..., description="破坏项发现序号 id")
     reason: str = Field(..., description="豁免理由（必填）")
     expires_at: str = Field(..., description="UTC 到期时间（ISO 8601，须为未来时间）")
+
+
+class SampleValidationRequest(BaseModel):
+    # 每条样本以原始对象宽松接收：字段缺失 / 类型错误由后端逐条给出错误
+    samples: list[dict[str, Any]] = Field(
+        ...,
+        description=(
+            "多条请求样本，每条含 method（旧版操作 HTTP 方法）、"
+            "path（旧版路径模板，如 /pets/{id}）、"
+            "content_type（如 application/json，也可写 contentType）、"
+            "body（JSON 文本字符串或直接 JSON 值）、index（可选）"
+        ),
+    )
 
 
 def _version_of(doc: dict[str, Any]) -> str | None:
@@ -321,6 +334,34 @@ async def import_inventory(review_id: int, request: Request) -> dict[str, Any]:
     try:
         result = impact.build_impact(old_doc, review["findings"], csv_text)
     except impact.ImpactCsvError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    result["review_id"] = review_id
+    return result
+
+
+# ---------------------------------------------------------------------- #
+# 请求样本回放校验（逐条旧/新请求体 schema 校验 + 风险汇总；仅本次查看）
+# ---------------------------------------------------------------------- #
+@app.post("/api/reviews/{review_id}/sample-validation")
+def validate_request_samples(review_id: int, req: SampleValidationRequest) -> dict[str, Any]:
+    """用多条真实 JSON 请求体回放校验旧版 / 新版操作的请求体 schema。
+
+    每条样本包含旧版操作的 method 与路径模板、Content-Type、JSON 请求体；
+    新版按**相同 method 与路径模板**查找操作，操作或媒体类型消失视为新版拒绝。
+    校验覆盖 type、required、enum、properties、items、allOf 与本地 $ref
+    （循环引用安全终止）；无法解析的引用或范围外约束标为无法判定，不计入风险。
+    旧版操作不存在、样本格式错误逐条报错；旧版拒绝的样本不计风险。
+
+    实时计算、不入库，结果只供本次查看，不改变审查结论。
+    """
+    review = database.get_review(review_id, with_specs=True)
+    if review is None:
+        raise HTTPException(status_code=404, detail="审查记录不存在")
+    try:
+        result = sample_validate.build_sample_validation(
+            review["old_spec"], review["new_spec"], req.samples
+        )
+    except sample_validate.SampleRequestError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     result["review_id"] = review_id
     return result
